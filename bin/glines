@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+G=$'\033[32m'
+R=$'\033[31m'
+C=$'\033[36m'
+B=$'\033[1m'
+D=$'\033[2m'
+X=$'\033[0m'
+
+detail=false
+scope=HEAD
+
+usage() {
+  cat <<EOF
+Usage: glines [-d|--detail] [ref]
+
+Show git line change stats (staged + unstaged + untracked vs ref).
+
+Options:
+  -d, --detail   List per-file additions and deletions
+  -h, --help     Show this help
+
+Examples:
+  glines              # vs HEAD
+  glines main         # vs main
+  glines -d           # with per-file breakdown
+  git lines -d        # same via git alias
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -d | --detail)
+      detail=true
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "glines: unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      scope="$1"
+      shift
+      ;;
+  esac
+done
+
+color_shortstat() {
+  local s="${1:-}"
+  if [[ -z "$s" ]]; then
+    printf '%s(none)%s\n' "$D" "$X"
+    return
+  fi
+  printf '%s' "$s" | sed -E \
+    "s/([0-9]+) insertion\\(\\+\\)/${G}\1${X} insertion(${G}+${X})/g; \
+     s/([0-9]+) insertions\\(\\+\\)/${G}\1${X} insertions(${G}+${X})/g; \
+     s/([0-9]+) deletion\\(-\\)/${R}\1${X} deletion(${R}-${X})/g; \
+     s/([0-9]+) deletions\\(-\\)/${R}\1${X} deletions(${R}-${X})/g"
+  printf '\n'
+}
+
+sum_numstat() {
+  git diff "$@" --numstat 2>/dev/null | awk '{a+=$1; d+=$2} END {print a+0, d+0}'
+}
+
+# Untracked files count as pure additions (all lines are new).
+sum_untracked_numstat() {
+  local adds=0 files=0
+  while IFS= read -r -d '' file; do
+    if [[ -f "$file" ]]; then
+      local n
+      n=$(wc -l < "$file" 2>/dev/null || echo 0)
+      n=${n// /}
+      adds=$((adds + n))
+      files=$((files + 1))
+    fi
+  done < <(git ls-files --others --exclude-standard -z 2>/dev/null)
+  echo "$adds 0 $files"
+}
+
+untracked_shortstat() {
+  local adds files
+  read -r adds _ files <<< "$(sum_untracked_numstat)"
+  if [[ "$files" -eq 0 ]]; then
+    return
+  fi
+  local ins_word=insertions
+  local file_word=files
+  [[ "$adds" -eq 1 ]] && ins_word=insertion
+  [[ "$files" -eq 1 ]] && file_word=file
+  echo "$files $file_word changed, $adds $ins_word(+)"
+}
+
+collect_untracked_numstat_lines() {
+  while IFS= read -r -d '' file; do
+    if [[ -f "$file" ]]; then
+      local n
+      n=$(wc -l < "$file" 2>/dev/null || echo 0)
+      n=${n// /}
+      printf '%s\t%s\t0\t%s\n' "$n" "$n" "$file"
+    fi
+  done < <(git ls-files --others --exclude-standard -z 2>/dev/null)
+}
+
+print_file_stats() {
+  local title="$1"
+  shift
+  local include_untracked=false
+  if [[ "${1:-}" == --include-untracked ]]; then
+    include_untracked=true
+    shift
+  fi
+  local lines
+  lines=$(
+    {
+      git diff "$@" --numstat 2>/dev/null \
+        | awk -F'\t' 'NF == 3 {print ($1 + $2) "\t" $1 "\t" $2 "\t" $3}'
+      if $include_untracked; then
+        collect_untracked_numstat_lines
+      fi
+    } | sort -t$'\t' -k1,1nr
+  )
+  if [[ -z "$lines" ]]; then
+    return
+  fi
+  printf '\n%b%b%s:%b\n' "$B" "$C" "$title" "$X"
+  while IFS=$'\t' read -r _total add del file; do
+    printf '  %s  %b+%s%b  %b-%s%b\n' "$file" "$G" "$add" "$X" "$R" "$del" "$X"
+  done <<< "$lines"
+}
+
+print_untracked_file_stats() {
+  local lines
+  lines=$(collect_untracked_numstat_lines | sort -t$'\t' -k1,1nr)
+  if [[ -z "$lines" ]]; then
+    return
+  fi
+  printf '\n%b%buntracked files:%b\n' "$B" "$C" "$X"
+  while IFS=$'\t' read -r _total add del file; do
+    printf '  %s  %b+%s%b  %b-%s%b\n' "$file" "$G" "$add" "$X" "$R" "$del" "$X"
+  done <<< "$lines"
+}
+
+read -r a del <<< "$(sum_numstat "$scope")"
+read -r ua _ud _ufiles <<< "$(sum_untracked_numstat)"
+a=$((a + ua))
+# Untracked files are additions only; deletions stay from tracked diffs.
+total=$((a + del))
+staged=$(git diff --cached --shortstat 2>/dev/null || true)
+unstaged=$(git diff --shortstat 2>/dev/null || true)
+untracked=$(untracked_shortstat || true)
+
+printf '%b%bcombined:%b %b+%s%b %b-%s%b %b(total %s)%b\n' \
+  "$B" "$C" "$X" "$G" "$a" "$X" "$R" "$del" "$X" "$D" "$total" "$X"
+printf '  %bstaged:%b   ' "$C" "$X"
+color_shortstat "$staged"
+printf '  %bunstaged:%b ' "$C" "$X"
+color_shortstat "$unstaged"
+printf '  %buntracked:%b ' "$C" "$X"
+color_shortstat "$untracked"
+
+if $detail; then
+  print_file_stats "changed files (combined)" --include-untracked "$scope"
+  if [[ -n "$staged" ]]; then
+    print_file_stats "staged files" --cached
+  fi
+  if [[ -n "$unstaged" ]]; then
+    print_file_stats "unstaged files"
+  fi
+  if [[ -n "$untracked" ]]; then
+    print_untracked_file_stats
+  fi
+fi
