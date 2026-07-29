@@ -2,7 +2,6 @@
 set -euo pipefail
 
 G=$'\033[32m'
-R=$'\033[31m'
 Y=$'\033[33m'
 C=$'\033[36m'
 B=$'\033[1m'
@@ -10,27 +9,23 @@ D=$'\033[2m'
 X=$'\033[0m'
 
 dry_run=false
-force=false
 
 usage() {
   cat <<EOF
-Usage: ggone [-n|--dry-run] [-f|--force]
+Usage: ggone [-n|--dry-run]
 
 Prune deleted remote-tracking refs, then delete local branches whose
-upstream is gone. Only touches branches you have checked out locally.
+upstream is gone. Remote deleted = local deleted. No merge check.
 
-Merged (including squash/rebase via local patch-id) are deleted.
-Unmerged are skipped unless -f is passed.
+Skips the currently checked-out branch.
 
 Options:
   -n, --dry-run   List, do not delete
-  -f, --force     Also delete unmerged branches
   -h, --help      Show this help
 
 Examples:
   ggone
   ggone -n
-  ggone -f
   git gone
 EOF
 }
@@ -42,7 +37,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -f | --force)
-      force=true
+      # Kept for backwards compat; force is now the default.
       shift
       ;;
     -h | --help)
@@ -67,55 +62,6 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 1
 fi
 
-default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
-if [[ -z "$default_branch" ]]; then
-  if git show-ref --verify --quiet refs/remotes/origin/master; then
-    default_branch=master
-  elif git show-ref --verify --quiet refs/remotes/origin/main; then
-    default_branch=main
-  fi
-fi
-
-base_ref=""
-if [[ -n "$default_branch" ]]; then
-  base_ref="origin/$default_branch"
-fi
-
-# Local squash/rebase detection (no network): synthesize a single commit
-# of branch^{tree} on the merge-base, then git cherry (patch-id).
-# Equivalent to the technique used by git-delete-squashed.
-is_squash_merged() {
-  local branch=$1
-  local merge_base tree tmp cherry_out
-
-  [[ -n "$base_ref" ]] || return 1
-
-  merge_base=$(git merge-base "$base_ref" "$branch" 2>/dev/null) || return 1
-  tree=$(git rev-parse "$branch^{tree}" 2>/dev/null) || return 1
-  tmp=$(git commit-tree "$tree" -p "$merge_base" -m '_' 2>/dev/null) || return 1
-  cherry_out=$(git cherry "$base_ref" "$tmp" 2>/dev/null) || return 1
-
-  # '-' means patch already in base; empty also means nothing unique.
-  [[ -z "$cherry_out" || "$cherry_out" == -* ]]
-}
-
-classify_branch() {
-  local branch=$1
-
-  if [[ -n "$base_ref" ]] \
-    && git merge-base --is-ancestor "$branch" "$base_ref" 2>/dev/null; then
-    echo merged
-    return
-  fi
-
-  if is_squash_merged "$branch"; then
-    echo squash
-    return
-  fi
-
-  echo unmerged
-}
-
 git fetch --prune --quiet
 
 gone_list=$(
@@ -131,9 +77,7 @@ fi
 
 current=$(git branch --show-current 2>/dev/null || true)
 to_delete=''
-to_skip=''
 deleted_count=0
-skipped_count=0
 
 maxlen=0
 while IFS= read -r branch; do
@@ -153,42 +97,18 @@ while IFS= read -r branch; do
     continue
   fi
 
-  status=$(classify_branch "$branch")
-
-  case "$status" in
-    merged)
-      printf '  %b%-*s%b  %bmerged%b\n' \
-        "$C" "$maxlen" "$branch" "$X" "$G" "$X"
-      to_delete="${to_delete}${branch}"$'\n'
-      ;;
-    squash)
-      printf '  %b%-*s%b  %bmerged (squash)%b\n' \
-        "$C" "$maxlen" "$branch" "$X" "$G" "$X"
-      to_delete="${to_delete}${branch}"$'\n'
-      ;;
-    unmerged)
-      printf '  %b%-*s%b  %bunmerged%b\n' \
-        "$C" "$maxlen" "$branch" "$X" "$Y" "$X"
-      if $force; then
-        to_delete="${to_delete}${branch}"$'\n'
-      else
-        to_skip="${to_skip}${branch}"$'\n'
-      fi
-      ;;
-  esac
+  printf '  %b%-*s%b  %bgone%b\n' \
+    "$C" "$maxlen" "$branch" "$X" "$G" "$X"
+  to_delete="${to_delete}${branch}"$'\n'
 done <<< "$gone_list"
 
 to_delete=$(printf '%s' "$to_delete" | sed '/^$/d')
-to_skip=$(printf '%s' "$to_skip" | sed '/^$/d')
 
 if [[ -n "$to_delete" ]]; then
   deleted_count=$(printf '%s\n' "$to_delete" | wc -l | tr -d ' ')
 fi
-if [[ -n "$to_skip" ]]; then
-  skipped_count=$(printf '%s\n' "$to_skip" | wc -l | tr -d ' ')
-fi
 
-if [[ -z "$to_delete" && -z "$to_skip" ]]; then
+if [[ -z "$to_delete" ]]; then
   printf '%b%bnothing deleted%b\n' "$B" "$Y" "$X"
   exit 0
 fi
@@ -196,36 +116,13 @@ fi
 printf '\n'
 
 if $dry_run; then
-  if [[ "$deleted_count" -gt 0 ]]; then
-    printf '%bdry-run%b  would delete %s\n' "$Y" "$X" "$deleted_count"
-  fi
-  if [[ "$skipped_count" -gt 0 ]]; then
-    printf '%bskipped%b  %s (unmerged — use -f)\n' "$Y" "$X" "$skipped_count"
-  fi
+  printf '%bdry-run%b  would delete %s\n' "$Y" "$X" "$deleted_count"
   exit 0
 fi
 
-if [[ -n "$to_delete" ]]; then
-  while IFS= read -r branch; do
-    [[ -z "$branch" ]] && continue
-    git branch -D "$branch" >/dev/null
-  done <<< "$to_delete"
-fi
+while IFS= read -r branch; do
+  [[ -z "$branch" ]] && continue
+  git branch -D "$branch" >/dev/null
+done <<< "$to_delete"
 
-parts=''
-if [[ "$deleted_count" -gt 0 ]]; then
-  parts="deleted ${deleted_count}"
-fi
-if [[ "$skipped_count" -gt 0 ]]; then
-  if [[ -n "$parts" ]]; then
-    parts="${parts}, skipped ${skipped_count} (unmerged — use -f)"
-  else
-    parts="skipped ${skipped_count} (unmerged — use -f)"
-  fi
-fi
-
-if [[ "$deleted_count" -gt 0 ]]; then
-  printf '%b%s%b\n' "$G" "$parts" "$X"
-else
-  printf '%b%s%b\n' "$Y" "$parts" "$X"
-fi
+printf '%bdeleted %s%b\n' "$G" "$deleted_count" "$X"
