@@ -7,7 +7,7 @@ Personal git CLI helpers — short colored shortcuts for everyday git cleanup an
 | Command | Git alias | What it does |
 |---|---|---|
 | `glines` | `git lines` | Line change stats (staged / unstaged / untracked) |
-| `ggone` | `git gone` | Prune gone remotes and delete matching local branches |
+| `ggone` | `git gone` | Prune gone remotes, remove their worktrees, delete matching local branches |
 
 ## Install
 
@@ -38,7 +38,6 @@ glines              # vs HEAD
 glines -d           # per-file breakdown
 glines main
 
-ggone               # delete merged gone locals; skip unmerged
+ggone               # delete gone locals and their worktrees
 ggone -n            # dry-run
-ggone -f            # also delete unmerged
 ```

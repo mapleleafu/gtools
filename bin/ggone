@@ -15,7 +15,9 @@ usage() {
 Usage: ggone [-n|--dry-run]
 
 Prune deleted remote-tracking refs, then delete local branches whose
-upstream is gone. Remote deleted = local deleted. No merge check.
+upstream is gone. Worktrees are renamed aside, unregistered, then
+deleted in the background. Remote deleted = local deleted. No merge
+check.
 
 Skips the currently checked-out branch.
 
@@ -63,11 +65,20 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 git fetch --prune --quiet
+git worktree prune --expire now >/dev/null 2>&1 || true
 
-gone_list=$(
-  git branch -vv \
-    | sed 's/^[* ] //' \
-    | awk '/: gone]/{print $1}'
+current=$(git branch --show-current 2>/dev/null || true)
+current_wt=$(git rev-parse --show-toplevel)
+
+gone_list=''
+while IFS=$'\t' read -r branch track worktree; do
+  [[ -z "$branch" ]] && continue
+  [[ "$track" == '[gone]' ]] || continue
+  gone_list+="${branch}"$'\t'"${worktree}"$'\n'
+done < <(
+  git for-each-ref \
+    --format='%(refname:short)%09%(upstream:track)%09%(worktreepath)' \
+    refs/heads
 )
 
 if [[ -z "$gone_list" ]]; then
@@ -75,12 +86,12 @@ if [[ -z "$gone_list" ]]; then
   exit 0
 fi
 
-current=$(git branch --show-current 2>/dev/null || true)
 to_delete=''
 deleted_count=0
+worktree_count=0
 
 maxlen=0
-while IFS= read -r branch; do
+while IFS=$'\t' read -r branch worktree; do
   [[ -z "$branch" ]] && continue
   n=${#branch}
   if [[ "$n" -gt "$maxlen" ]]; then
@@ -88,7 +99,42 @@ while IFS= read -r branch; do
   fi
 done <<< "$gone_list"
 
-while IFS= read -r branch; do
+short_path() {
+  local path=$1
+  if [[ -n "$HOME" && "$path" == "$HOME"/* ]]; then
+    printf '~%s' "${path#"$HOME"}"
+  else
+    printf '%s' "$path"
+  fi
+}
+
+# git worktree remove deletes every file in-tree (node_modules etc).
+# Rename off the registered path first so unregister is metadata-only,
+# then unlink in the background so ggone does not wait on disk.
+retire_worktree() {
+  local path=$1
+  local dest
+
+  if [[ ! -e "$path" ]]; then
+    git worktree remove --force "$path" >/dev/null 2>&1 || \
+      git worktree prune --expire now >/dev/null
+    return 0
+  fi
+
+  dest="$(dirname "$path")/.ggone-dead-$(basename "$path")-$$-$(date +%s)"
+
+  if mv "$path" "$dest"; then
+    git worktree remove --force "$path" >/dev/null 2>&1 || \
+      git worktree prune --expire now >/dev/null
+    nohup rm -rf "$dest" >/dev/null 2>&1 &
+    disown $! 2>/dev/null || true
+    return 0
+  fi
+
+  git worktree remove --force "$path" >/dev/null
+}
+
+while IFS=$'\t' read -r branch worktree; do
   [[ -z "$branch" ]] && continue
 
   if [[ "$branch" == "$current" ]]; then
@@ -97,9 +143,27 @@ while IFS= read -r branch; do
     continue
   fi
 
-  printf '  %b%-*s%b  %bgone%b\n' \
-    "$C" "$maxlen" "$branch" "$X" "$G" "$X"
-  to_delete="${to_delete}${branch}"$'\n'
+  if [[ -n "$worktree" && "$worktree" == "$current_wt" ]]; then
+    printf '  %b%-*s%b  %bskip%b  (checked out)\n' \
+      "$C" "$maxlen" "$branch" "$X" "$D" "$X"
+    continue
+  fi
+
+  if [[ -n "$worktree" && -d "$worktree/.git" ]]; then
+    printf '  %b%-*s%b  %bskip%b  (main worktree)\n' \
+      "$C" "$maxlen" "$branch" "$X" "$D" "$X"
+    continue
+  fi
+
+  if [[ -n "$worktree" ]]; then
+    printf '  %b%-*s%b  %bgone%b  %s\n' \
+      "$C" "$maxlen" "$branch" "$X" "$G" "$X" "$(short_path "$worktree")"
+    worktree_count=$((worktree_count + 1))
+  else
+    printf '  %b%-*s%b  %bgone%b\n' \
+      "$C" "$maxlen" "$branch" "$X" "$G" "$X"
+  fi
+  to_delete+="${branch}"$'\t'"${worktree}"$'\n'
 done <<< "$gone_list"
 
 to_delete=$(printf '%s' "$to_delete" | sed '/^$/d')
@@ -116,13 +180,49 @@ fi
 printf '\n'
 
 if $dry_run; then
-  printf '%bdry-run%b  would delete %s\n' "$Y" "$X" "$deleted_count"
+  if [[ "$worktree_count" -gt 0 ]]; then
+    printf '%bdry-run%b  would delete %s (%s worktrees)\n' \
+      "$Y" "$X" "$deleted_count" "$worktree_count"
+  else
+    printf '%bdry-run%b  would delete %s\n' "$Y" "$X" "$deleted_count"
+  fi
   exit 0
 fi
 
-while IFS= read -r branch; do
+failed=0
+removed_wt=0
+deleted=0
+
+while IFS=$'\t' read -r branch worktree; do
   [[ -z "$branch" ]] && continue
-  git branch -D "$branch" >/dev/null
+
+  if [[ -n "$worktree" ]]; then
+    printf '  removing  %s\n' "$(short_path "$worktree")"
+    if retire_worktree "$worktree"; then
+      removed_wt=$((removed_wt + 1))
+    else
+      printf '  %b%-*s%b  %bfail%b  worktree %s\n' \
+        "$C" "$maxlen" "$branch" "$X" "$Y" "$X" "$(short_path "$worktree")" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+  fi
+
+  if git branch -D "$branch" >/dev/null; then
+    deleted=$((deleted + 1))
+  else
+    printf '  %b%-*s%b  %bfail%b\n' \
+      "$C" "$maxlen" "$branch" "$X" "$Y" "$X" >&2
+    failed=$((failed + 1))
+  fi
 done <<< "$to_delete"
 
-printf '%bdeleted %s%b\n' "$G" "$deleted_count" "$X"
+if [[ "$removed_wt" -gt 0 ]]; then
+  printf '%bdeleted %s%b  (%s worktrees)\n' "$G" "$deleted" "$X" "$removed_wt"
+else
+  printf '%bdeleted %s%b\n' "$G" "$deleted" "$X"
+fi
+
+if [[ "$failed" -gt 0 ]]; then
+  exit 1
+fi
