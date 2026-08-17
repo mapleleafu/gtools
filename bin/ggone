@@ -281,6 +281,9 @@ done < <(
 if [[ -n "$pr_check_names" ]]; then
   while IFS=$'\t' read -r branch state; do
     [[ -z "$branch" ]] && continue
+    case $'\n'"$stale_list" in
+      *$'\n'"${branch}${FS}"*) continue ;;
+    esac
     case "$state" in
       CLOSED)
         stale_list+="${branch}${FS}$(worktree_for "$branch" "$all_wt")${FS}closed"$'\n'
@@ -289,7 +292,10 @@ if [[ -n "$pr_check_names" ]]; then
         stale_list+="${branch}${FS}$(worktree_for "$branch" "$all_wt")${FS}merged"$'\n'
         ;;
     esac
-  done < <(fetch_pr_states "$pr_check_names")
+  done < <(
+    fetch_pr_states "$pr_check_names"
+    fetch_pr_number_states "$pr_check_names"
+  )
 fi
 
 if [[ -z "$stale_list" ]]; then
