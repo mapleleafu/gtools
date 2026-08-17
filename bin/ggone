@@ -90,16 +90,38 @@ escape_gql() {
   printf '%s' "$s"
 }
 
+worktree_for() {
+  local want=$1
+  local list=$2
+  local b wt
+  while IFS=$'\t' read -r b wt; do
+    [[ -z "$b" ]] && continue
+    if [[ "$b" == "$want" ]]; then
+      printf '%s' "$wt"
+      return 0
+    fi
+  done <<< "$list"
+  return 1
+}
+
 # Prints branch<TAB>OPEN|CLOSED|MERGED|NONE for each input branch.
 fetch_pr_states() {
-  local -a branches=("$@")
+  local branches_nl=$1
   local owner name
   local repo_meta
   local batch_size=20
-  local i start end
+  local i start end total
   local query result key state idx
+  local -a branches
 
-  if [[ ${#branches[@]} -eq 0 ]]; then
+  branches=()
+  while IFS= read -r branch; do
+    [[ -z "$branch" ]] && continue
+    branches+=("$branch")
+  done <<< "$branches_nl"
+
+  total=${#branches[@]}
+  if [[ "$total" -eq 0 ]]; then
     return 0
   fi
 
@@ -121,10 +143,10 @@ fetch_pr_states() {
   owner=${repo_meta%%$'\t'*}
   name=${repo_meta#*$'\t'}
 
-  for ((start = 0; start < ${#branches[@]}; start += batch_size)); do
+  for ((start = 0; start < total; start += batch_size)); do
     end=$((start + batch_size))
-    if [[ "$end" -gt ${#branches[@]} ]]; then
-      end=${#branches[@]}
+    if [[ "$end" -gt "$total" ]]; then
+      end=$total
     fi
 
     query='query { repository(owner: "'$(escape_gql "$owner")'", name: "'$(escape_gql "$name")'") {'
@@ -163,21 +185,19 @@ fetch_pr_states() {
 }
 
 stale_list=''
-pr_check_branches=()
-declare -A branch_worktree=()
-declare -A branch_reason=()
+pr_check_names=''
+all_wt=''
 
 while IFS=$'\t' read -r branch track worktree; do
   [[ -z "$branch" ]] && continue
   if is_protected "$branch"; then
     continue
   fi
-  branch_worktree["$branch"]=$worktree
+  all_wt+="${branch}"$'\t'"${worktree}"$'\n'
   if [[ "$track" == '[gone]' ]]; then
-    branch_reason["$branch"]=gone
     stale_list+="${branch}"$'\t'"${worktree}"$'\t'"gone"$'\n'
   else
-    pr_check_branches+=("$branch")
+    pr_check_names+="${branch}"$'\n'
   fi
 done < <(
   git for-each-ref \
@@ -185,17 +205,18 @@ done < <(
     refs/heads
 )
 
-if [[ ${#pr_check_branches[@]} -gt 0 ]]; then
+if [[ -n "$pr_check_names" ]]; then
   while IFS=$'\t' read -r branch state; do
     [[ -z "$branch" ]] && continue
     case "$state" in
-      CLOSED | MERGED)
-        reason=$(printf '%s' "$state" | tr '[:upper:]' '[:lower:]')
-        branch_reason["$branch"]=$reason
-        stale_list+="${branch}"$'\t'"${branch_worktree[$branch]}"$'\t'"${reason}"$'\n'
+      CLOSED)
+        stale_list+="${branch}"$'\t'"$(worktree_for "$branch" "$all_wt")"$'\t'"closed"$'\n'
+        ;;
+      MERGED)
+        stale_list+="${branch}"$'\t'"$(worktree_for "$branch" "$all_wt")"$'\t'"merged"$'\n'
         ;;
     esac
-  done < <(fetch_pr_states "${pr_check_branches[@]}")
+  done < <(fetch_pr_states "$pr_check_names")
 fi
 
 if [[ -z "$stale_list" ]]; then

@@ -7,7 +7,7 @@ Personal git CLI helpers — short colored shortcuts for everyday git cleanup an
 | Command | Git alias | What it does |
 |---|---|---|
 | `glines` | `git lines` | Line change stats (staged / unstaged / untracked) |
-| `ggone` | `git gone` | Prune gone remotes, remove their worktrees, delete matching local branches |
+| `ggone` | `git gone` | Delete local branches whose remote is gone or whose GitHub PR is closed/merged, including their worktrees |
 
 ## Install
 
