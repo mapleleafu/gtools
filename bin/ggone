@@ -230,7 +230,7 @@ deleted_count=0
 worktree_count=0
 
 maxlen=0
-while IFS=$'\t' read -r branch worktree reason; do
+while IFS="$FS" read -r branch worktree reason; do
   [[ -z "$branch" ]] && continue
   n=${#branch}
   if [[ "$n" -gt "$maxlen" ]]; then
