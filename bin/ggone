@@ -302,7 +302,7 @@ while IFS="$FS" read -r branch worktree reason; do
     printf '  %b%-*s%b  %b%s%b\n' \
       "$C" "$maxlen" "$branch" "$X" "$G" "$reason" "$X"
   fi
-  to_delete+="${branch}"$'\t'"${worktree}"$'\n'
+  to_delete+="${branch}${FS}${worktree}"$'\n'
 done <<< "$stale_list"
 
 to_delete=$(printf '%s' "$to_delete" | sed '/^$/d')
