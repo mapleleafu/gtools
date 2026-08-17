@@ -185,6 +185,78 @@ fetch_pr_states() {
   done
 }
 
+# Prints branch<TAB>STATE for local leftover names like pr-23609.
+fetch_pr_number_states() {
+  local branches_nl=$1
+  local owner name
+  local repo_meta
+  local batch_size=20
+  local i start end total
+  local query result key state idx num
+  local -a branches
+  local -a numbers
+
+  branches=()
+  numbers=()
+  while IFS= read -r branch; do
+    [[ -z "$branch" ]] && continue
+    num=${branch#pr-}
+    if [[ "$branch" != pr-* || ! "$num" =~ ^[0-9]+$ ]]; then
+      continue
+    fi
+    branches+=("$branch")
+    numbers+=("$num")
+  done <<< "$branches_nl"
+
+  total=${#branches[@]}
+  if [[ "$total" -eq 0 ]]; then
+    return 0
+  fi
+
+  if ! command -v gh >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! gh auth status >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! repo_meta=$(gh repo view --json owner,name --jq '[.owner.login, .name] | @tsv' 2>/dev/null); then
+    return 0
+  fi
+
+  owner=${repo_meta%%$'\t'*}
+  name=${repo_meta#*$'\t'}
+
+  for ((start = 0; start < total; start += batch_size)); do
+    end=$((start + batch_size))
+    if [[ "$end" -gt "$total" ]]; then
+      end=$total
+    fi
+
+    query='query { repository(owner: "'$(escape_gql "$owner")'", name: "'$(escape_gql "$name")'") {'
+    for ((i = start; i < end; i++)); do
+      query+=' n'$((i - start))': pullRequest(number: '"${numbers[$i]}"') { state }'
+    done
+    query+=' } }'
+
+    if ! result=$(gh api graphql -f query="$query" --jq '
+      .data.repository
+      | to_entries[]
+      | [ .key, (.value.state // "NONE") ]
+      | @tsv
+    ' 2>/dev/null); then
+      return 0
+    fi
+
+    while IFS=$'\t' read -r key state; do
+      [[ -z "$key" ]] && continue
+      idx=${key#n}
+      printf '%s\t%s\n' "${branches[$((start + idx))]}" "$state"
+    done <<< "$result"
+  done
+}
+
 stale_list=''
 pr_check_names=''
 all_wt=''
