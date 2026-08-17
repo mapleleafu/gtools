@@ -38,6 +38,6 @@ glines              # vs HEAD
 glines -d           # per-file breakdown
 glines main
 
-ggone               # delete gone locals and their worktrees
+ggone               # delete gone or closed-PR locals and their worktrees
 ggone -n            # dry-run
 ```
