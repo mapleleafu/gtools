@@ -93,7 +93,7 @@ escape_gql() {
 
 worktree_for() {
   local want=$1
-  local list=$2
+  local list="$2"
   local b wt
   while IFS="$FS" read -r b wt; do
     [[ -z "$b" ]] && continue
