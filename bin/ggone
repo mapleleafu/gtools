@@ -273,7 +273,7 @@ retire_worktree() {
   git worktree remove --force "$path" >/dev/null
 }
 
-while IFS=$'\t' read -r branch worktree reason; do
+while IFS="$FS" read -r branch worktree reason; do
   [[ -z "$branch" ]] && continue
 
   if [[ "$branch" == "$current" ]]; then
