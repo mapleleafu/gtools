@@ -95,7 +95,7 @@ worktree_for() {
   local want=$1
   local list=$2
   local b wt
-  while IFS=$'\t' read -r b wt; do
+  while IFS="$FS" read -r b wt; do
     [[ -z "$b" ]] && continue
     if [[ "$b" == "$want" ]]; then
       printf '%s' "$wt"
