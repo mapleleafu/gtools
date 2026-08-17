@@ -189,20 +189,20 @@ stale_list=''
 pr_check_names=''
 all_wt=''
 
-while IFS=$'\t' read -r branch track worktree; do
+while IFS="$FS" read -r branch track worktree; do
   [[ -z "$branch" ]] && continue
   if is_protected "$branch"; then
     continue
   fi
-  all_wt+="${branch}"$'\t'"${worktree}"$'\n'
+  all_wt+="${branch}${FS}${worktree}"$'\n'
   if [[ "$track" == '[gone]' ]]; then
-    stale_list+="${branch}"$'\t'"${worktree}"$'\t'"gone"$'\n'
+    stale_list+="${branch}${FS}${worktree}${FS}gone"$'\n'
   else
     pr_check_names+="${branch}"$'\n'
   fi
 done < <(
   git for-each-ref \
-    --format='%(refname:short)%09%(upstream:track)%09%(worktreepath)' \
+    --format="%(refname:short)${FS}%(upstream:track)${FS}%(worktreepath)" \
     refs/heads
 )
 
@@ -211,10 +211,10 @@ if [[ -n "$pr_check_names" ]]; then
     [[ -z "$branch" ]] && continue
     case "$state" in
       CLOSED)
-        stale_list+="${branch}"$'\t'"$(worktree_for "$branch" "$all_wt")"$'\t'"closed"$'\n'
+        stale_list+="${branch}${FS}$(worktree_for "$branch" "$all_wt")${FS}closed"$'\n'
         ;;
       MERGED)
-        stale_list+="${branch}"$'\t'"$(worktree_for "$branch" "$all_wt")"$'\t'"merged"$'\n'
+        stale_list+="${branch}${FS}$(worktree_for "$branch" "$all_wt")${FS}merged"$'\n'
         ;;
     esac
   done < <(fetch_pr_states "$pr_check_names")
