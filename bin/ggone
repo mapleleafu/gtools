@@ -332,7 +332,7 @@ failed=0
 removed_wt=0
 deleted=0
 
-while IFS=$'\t' read -r branch worktree; do
+while IFS="$FS" read -r branch worktree; do
   [[ -z "$branch" ]] && continue
 
   if [[ -n "$worktree" ]]; then
