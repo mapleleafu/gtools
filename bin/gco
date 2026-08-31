@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+G=$'\033[32m'
+Y=$'\033[33m'
+C=$'\033[36m'
+B=$'\033[1m'
+D=$'\033[2m'
+X=$'\033[0m'
+FS=$'\x1f'
+
+steal=false
+args=()
+
+usage() {
+  cat <<EOF
+Usage: gco [-s|--steal] [checkout-args]
+
+git checkout. -s frees the branch from another worktree first
+(submodules included), then checks it out here.
+
+Options:
+  -s, --steal   Steal branch from its worktree, then checkout
+  -h, --help    Show this help
+
+Examples:
+  gco my-branch
+  gco -s my-branch
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -s | --steal)
+      steal=true
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      args+=("$@")
+      break
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "gco: not a git repository" >&2
+  exit 1
+fi
+
+if ! $steal; then
+  exec git checkout "${args[@]}"
+fi
+
+if [[ ${#args[@]} -ne 1 ]]; then
+  echo "gco: -s requires exactly one branch" >&2
+  usage >&2
+  exit 1
+fi
+
+branch=${args[0]}
+current_wt=$(git rev-parse --show-toplevel)
+
+worktree_for() {
+  local want=$1 b wt
+  while IFS="$FS" read -r b wt; do
+    [[ -z "$b" ]] && continue
+    if [[ "$b" == "$want" ]]; then
+      printf '%s' "$wt"
+      return 0
+    fi
+  done < <(
+    git for-each-ref \
+      --format="%(refname:short)${FS}%(worktreepath)" \
+      refs/heads
+  )
+  return 1
+}
+
+short_path() {
+  local path=$1
+  if [[ -n "$HOME" && "$path" == "$HOME"/* ]]; then
+    printf '~%s' "${path#"$HOME"}"
+  else
+    printf '%s' "$path"
+  fi
+}
+
+retire_worktree() {
+  local path=$1
+  local dest
+
+  if [[ ! -e "$path" ]]; then
+    git worktree remove --force "$path" >/dev/null 2>&1 || \
+      git worktree prune --expire now >/dev/null
+    return 0
+  fi
+
+  dest="$(dirname "$path")/.gco-dead-$(basename "$path")-$$-$(date +%s)"
+
+  if mv "$path" "$dest"; then
+    git worktree remove --force "$path" >/dev/null 2>&1 || \
+      git worktree prune --expire now >/dev/null
+    nohup rm -rf "$dest" >/dev/null 2>&1 &
+    disown $! 2>/dev/null || true
+    return 0
+  fi
+
+  git worktree remove --force "$path" >/dev/null
+}
+
+wt=$(worktree_for "$branch" || true)
+
+if [[ -z "$wt" ]]; then
+  exec git checkout "$branch"
+fi
+
+if [[ "$wt" == "$current_wt" ]]; then
+  printf '%balready here%b  %s\n' "$G" "$X" "$(short_path "$wt")"
+  exit 0
+fi
+
+if [[ -d "$wt/.git" ]]; then
+  printf '%bcannot steal main worktree%b  %s\n' "$Y" "$X" "$(short_path "$wt")" >&2
+  exit 1
+fi
+
+printf '%bsteal%b  %s  %s\n' "$B$C" "$X" "$branch" "$(short_path "$wt")"
+retire_worktree "$wt"
+exec git checkout "$branch"
