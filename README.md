@@ -8,6 +8,7 @@ Personal git CLI helpers — short colored shortcuts for everyday git cleanup an
 |---|---|---|
 | `glines` | `git lines` | Line change stats (staged / unstaged / untracked) |
 | `ggone` | `git gone` | Delete local branches whose remote is gone or whose GitHub PR is closed/merged, including their worktrees |
+| `gco` | overrides Oh My Zsh `gco` | `git checkout`; `-s` steals the branch from another worktree first |
 
 ## Install
 
