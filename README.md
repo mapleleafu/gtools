@@ -25,6 +25,8 @@ Optional shell wrappers / aliases:
 # ~/.zshrc
 glines() { command "$HOME/bin/glines" "$@"; }
 ggone()  { command "$HOME/bin/ggone"  "$@"; }
+unalias gco 2>/dev/null
+alias gco="$HOME/bin/gco"
 ```
 
 ```bash
