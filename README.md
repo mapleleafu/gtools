@@ -43,4 +43,7 @@ glines main
 
 ggone               # delete gone or closed-PR locals and their worktrees
 ggone -n            # dry-run
+
+gco my-branch       # git checkout
+gco -s my-branch    # steal from another worktree, then checkout
 ```
