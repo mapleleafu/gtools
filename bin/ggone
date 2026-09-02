@@ -20,7 +20,9 @@ upstream is gone or whose GitHub PR is closed or merged. Worktrees
 are renamed aside, unregistered, then deleted in the background.
 Remote deleted or PR closed = local deleted. No merge check.
 
-Skips the currently checked-out branch and default branches.
+If the current branch is stale, checks out the default branch first,
+then deletes it. Skips default branches and branches checked out in
+another worktree.
 
 Options:
   -n, --dry-run   List, do not delete
@@ -83,6 +85,83 @@ is_protected() {
   fi
   return 1
 }
+
+# Default branch to land on when the branch being deleted is checked out.
+# DWIM checkout creates the local branch when only origin has it.
+home_branch() {
+  local -a candidates
+  local b
+  candidates=()
+  if [[ -n "$default_branch" ]]; then
+    candidates+=("$default_branch")
+  fi
+  candidates+=(master main develop trunk)
+  for b in "${candidates[@]}"; do
+    if git show-ref --verify --quiet "refs/heads/$b"; then
+      printf '%s' "$b"
+      return 0
+    fi
+  done
+  for b in "${candidates[@]}"; do
+    if git show-ref --verify --quiet "refs/remotes/origin/$b"; then
+      printf '%s' "$b"
+      return 0
+    fi
+  done
+  return 1
+}
+
+worktree_holding() {
+  local want="refs/heads/$1"
+  local path=''
+  local line
+
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        path=${line#worktree }
+        ;;
+      branch\ *)
+        if [[ "${line#branch }" == "$want" ]]; then
+          printf '%s' "$path"
+          return 0
+        fi
+        ;;
+    esac
+  done < <(git worktree list --porcelain)
+
+  return 1
+}
+
+# Land on the real home branch, sharing it with another worktree if git
+# would otherwise refuse. Detaching is the last resort; either way HEAD
+# stops pointing at the branch so it can be deleted.
+leave_branch() {
+  local home=$1
+  local ref=$home
+  local holder
+
+  if git checkout --quiet "$home" 2>/dev/null; then
+    return 0
+  fi
+
+  if git show-ref --verify --quiet "refs/heads/$home"; then
+    holder=$(worktree_holding "$home" || true)
+    if git checkout --quiet --ignore-other-worktrees "$home" 2>/dev/null; then
+      if [[ -n "$holder" ]]; then
+        printf '  %balso checked out in %s%b\n' \
+          "$D" "$(short_path "$holder")" "$X"
+      fi
+      return 0
+    fi
+  else
+    ref="origin/$home"
+  fi
+
+  git checkout --quiet --detach "$ref" 2>/dev/null
+}
+
+home=$(home_branch || printf '')
 
 escape_gql() {
   local s=$1
@@ -354,15 +433,16 @@ retire_worktree() {
 while IFS="$FS" read -r branch worktree reason; do
   [[ -z "$branch" ]] && continue
 
-  if [[ "$branch" == "$current" ]]; then
-    printf '  %b%-*s%b  %bskip%b  (checked out)\n' \
-      "$C" "$maxlen" "$branch" "$X" "$D" "$X"
-    continue
-  fi
-
-  if [[ -n "$worktree" && "$worktree" == "$current_wt" ]]; then
-    printf '  %b%-*s%b  %bskip%b  (checked out)\n' \
-      "$C" "$maxlen" "$branch" "$X" "$D" "$X"
+  if [[ "$branch" == "$current" ]] ||
+    [[ -n "$worktree" && "$worktree" == "$current_wt" ]]; then
+    if [[ -z "$home" ]]; then
+      printf '  %b%-*s%b  %bskip%b  (checked out, no default branch)\n' \
+        "$C" "$maxlen" "$branch" "$X" "$D" "$X"
+      continue
+    fi
+    printf '  %b%-*s%b  %b%s%b  %bchecked out, switching to %s%b\n' \
+      "$C" "$maxlen" "$branch" "$X" "$G" "$reason" "$X" "$D" "$home" "$X"
+    to_delete+="${branch}${FS}${FS}current"$'\n'
     continue
   fi
 
@@ -380,7 +460,7 @@ while IFS="$FS" read -r branch worktree reason; do
     printf '  %b%-*s%b  %b%s%b\n' \
       "$C" "$maxlen" "$branch" "$X" "$G" "$reason" "$X"
   fi
-  to_delete+="${branch}${FS}${worktree}"$'\n'
+  to_delete+="${branch}${FS}${worktree}${FS}"$'\n'
 done <<< "$stale_list"
 
 to_delete=$(printf '%s' "$to_delete" | sed '/^$/d')
@@ -410,8 +490,18 @@ failed=0
 removed_wt=0
 deleted=0
 
-while IFS="$FS" read -r branch worktree; do
+while IFS="$FS" read -r branch worktree checked_out; do
   [[ -z "$branch" ]] && continue
+
+  if [[ "$checked_out" == 'current' ]]; then
+    printf '  switching  %s\n' "$home"
+    if ! leave_branch "$home"; then
+      printf '  %b%-*s%b  %bfail%b  could not switch to %s\n' \
+        "$C" "$maxlen" "$branch" "$X" "$Y" "$X" "$home" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+  fi
 
   if [[ -n "$worktree" ]]; then
     printf '  removing  %s\n' "$(short_path "$worktree")"
