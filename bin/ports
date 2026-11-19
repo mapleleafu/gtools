@@ -1,0 +1,147 @@
+#!/usr/bin/env zsh
+emulate -L zsh
+setopt extended_glob
+
+G=$'\033[32m'
+C=$'\033[36m'
+B=$'\033[1m'
+D=$'\033[2m'
+X=$'\033[0m'
+
+usage() {
+  cat <<EOF
+Usage: ports [-q] [-a] [path]
+
+Lists TCP ports served by processes started in this worktree (or in
+[path]), as clickable localhost links. Processes in a nested worktree
+count for that worktree, not the one around it.
+
+Options:
+  -q, --quiet   Print nothing when no port is found
+  -a, --all     Every worktree of this repo, grouped
+  -h, --help    Show this help
+EOF
+}
+
+quiet=false
+all=false
+here=$PWD
+while (( $# )); do
+  case $1 in
+    -q|--quiet) quiet=true ;;
+    -a|--all) all=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) here=$1 ;;
+  esac
+  shift
+done
+
+local -a rp
+rp=(${(f)"$(git -C "$here" rev-parse --path-format=absolute --show-toplevel --git-common-dir 2>/dev/null)"})
+if (( $#rp < 2 )); then
+  $quiet && exit 0
+  print -u2 "ports: not a git repository"
+  exit 1
+fi
+top=${rp[1]}
+common=${rp[2]}
+
+# Reading .git/worktrees directly; `git worktree list` stats every worktree and takes ~0.5s.
+typeset -a worktrees
+worktrees=(${common:h})
+local f
+for f in $common/worktrees/*/gitdir(N); do
+  worktrees+=(${$(<$f):h})
+done
+# Longest first, so a nested worktree wins over the checkout that contains it.
+worktrees=(${(On)worktrees})
+
+owner_of() {
+  local p=$1 wt
+  for wt in $worktrees; do
+    if [[ $p == $wt || $p == $wt/* ]]; then
+      print -r -- $wt
+      return 0
+    fi
+  done
+  return 1
+}
+
+typeset -A pid_ports pid_comm
+local pid='' line port
+while IFS= read -r line; do
+  case $line in
+    p*) pid=${line#p} ;;
+    c*) pid_comm[$pid]=${line#c} ;;
+    n*)
+      port=${line##*:}
+      [[ $port == <-> ]] || continue
+      [[ " ${pid_ports[$pid]} " == *" $port "* ]] || pid_ports[$pid]+=" $port"
+      ;;
+  esac
+done < <(lsof +c 0 -nP -iTCP -sTCP:LISTEN -Fpcn 2>/dev/null)
+
+(( ${#pid_ports} )) || { $quiet || print "${D}no listening ports${X}"; exit 0; }
+
+pids=${(j:,:)${(k)pid_ports}}
+
+typeset -A pid_cwd pid_args
+while IFS= read -r line; do
+  case $line in
+    p*) pid=${line#p} ;;
+    n*) pid_cwd[$pid]=${line#n} ;;
+  esac
+done < <(lsof -a -p $pids -d cwd -Fpn 2>/dev/null)
+
+while read -r pid line; do
+  pid_args[$pid]=$line
+done < <(ps -o pid=,args= -p $pids 2>/dev/null)
+
+typeset -A rows
+local wt w args exe label cmd
+for pid in ${(k)pid_ports}; do
+  args=${pid_args[$pid]:-}
+  exe=${pid_comm[$pid]:-}
+  # Agent harnesses listen for their own tools; they are not the app.
+  [[ $exe == (claude|codex|cursor-agent) ]] && continue
+
+  wt=$(owner_of "${pid_cwd[$pid]:-/nonexistent}") || {
+    wt=''
+    for w in $worktrees; do
+      if [[ $args == *"$w/"* ]]; then
+        wt=$w
+        break
+      fi
+    done
+  }
+  [[ -n $wt ]] || continue
+  $all || [[ $wt == $top ]] || continue
+
+  # args starts with the executable path, which may itself contain spaces.
+  if [[ $args == (#b)(*/$exe)( *|) ]]; then
+    label=${match[2]# }
+  else
+    label=${args#* }
+  fi
+  label=${label//$wt\//}
+  (( $#label > 70 )) && label="${label[1,67]}..."
+
+  for port in ${(z)pid_ports[$pid]}; do
+    rows[$wt]+="${(l:5:)port}"$'\t'"$exe"$'\t'"$label"$'\n'
+  done
+done
+
+if (( ! ${#rows} )); then
+  $quiet || print "${D}nothing listening from ${top/#$HOME/~}${X}"
+  exit 0
+fi
+
+for wt in ${(on)${(k)rows}}; do
+  $all && print "${B}${wt/#$HOME/~}${X}"
+  for line in ${(on)${(f)rows[$wt]}}; do
+    port=${${line%%$'\t'*}// /}
+    cmd=${${line#*$'\t'}%%$'\t'*}
+    label=${line##*$'\t'}
+    printf "  ${C}http://localhost:%-5s${X}  ${G}%-8s${X} ${D}%s${X}\n" "$port" "$cmd" "$label"
+  done
+done
